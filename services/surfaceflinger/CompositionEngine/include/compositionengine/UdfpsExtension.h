@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The Android Open Source Project
+ * Copyright 2021-2022 The LineageOS Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,12 +14,16 @@
  * limitations under the License.
  */
 
-#pragma once
+#include <stdint.h>
 
-#include <scheduler/FrameRateMode.h>
+#ifndef __UDFPS_EXTENSION__H__
+#define __UDFPS_EXTENSION__H__
 
-// Use a C style macro to keep the line numbers printed in gtest
-#define EXPECT_FRAME_RATE_MODE(_modePtr, _fps, _mode)                                \
-    EXPECT_EQ((scheduler::FrameRateMode{(_fps), (_modePtr)}), (_mode))               \
-            << "Expected " << (_fps) << " (" << (_modePtr)->getFps() << ") but was " \
-            << (_mode).fps << " (" << (_mode).modePtr->getFps() << ")"
+#define UDFPS_BIOMETRIC_PROMPT_LAYER_NAME "BiometricPrompt"
+#define UDFPS_LAYER_NAME "UdfpsControllerOverlay"
+#define UDFPS_TOUCHED_LAYER_NAME "SurfaceView[UdfpsControllerOverlay](BLAST)"
+
+extern uint32_t getUdfpsZOrder(uint32_t z, bool touched);
+extern uint64_t getUdfpsUsageBits(uint64_t usageBits, bool touched);
+
+#endif /* __UDFPS_EXTENSION__H__ */

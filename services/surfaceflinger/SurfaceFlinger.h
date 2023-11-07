@@ -194,7 +194,8 @@ class SurfaceFlinger : public BnSurfaceComposer,
                        private IBinder::DeathRecipient,
                        private HWC2::ComposerCallback,
                        private ICompositor,
-                       private scheduler::ISchedulerCallback {
+                       private scheduler::ISchedulerCallback,
+                       private compositionengine::ICEPowerCallback {
 public:
     struct SkipInitializationTag {};
 
@@ -646,6 +647,9 @@ private:
     void kernelTimerChanged(bool expired) override;
     void triggerOnFrameRateOverridesChanged() override;
 
+    // ICEPowerCallback overrides:
+    void notifyCpuLoadUp() override;
+
     // Toggles the kernel idle timer on or off depending the policy decisions around refresh rates.
     void toggleKernelIdleTimer() REQUIRES(mStateLock);
 
@@ -838,6 +842,8 @@ private:
             const std::shared_ptr<renderengine::ExternalTexture>&, bool canCaptureBlackoutContent,
             bool regionSampling, bool grayscale, ScreenCaptureResults&) EXCLUDES(mStateLock)
             REQUIRES(kMainThreadContext);
+
+    bool canAllocateHwcDisplayIdForVDS(uint64_t usage);
 
     // If the uid provided is not UNSET_UID, the traverse will skip any layers that don't have a
     // matching ownerUid
@@ -1049,7 +1055,8 @@ private:
     void enableHalVirtualDisplays(bool);
 
     // Virtual display lifecycle for ID generation and HAL allocation.
-    VirtualDisplayId acquireVirtualDisplay(ui::Size, ui::PixelFormat) REQUIRES(mStateLock);
+    VirtualDisplayId acquireVirtualDisplay(ui::Size, ui::PixelFormat, bool canAllocateHwcForVDS)
+            REQUIRES(mStateLock);
     void releaseVirtualDisplay(VirtualDisplayId);
 
     void onActiveDisplayChangedLocked(const DisplayDevice* inactiveDisplayPtr,
@@ -1420,6 +1427,9 @@ private:
     const sp<WindowInfosListenerInvoker> mWindowInfosListenerInvoker;
 
     FlagManager mFlagManager;
+    bool mAllowHwcForVDS = false;
+    bool mAllowHwcForWFD = false;
+    int mFirstApiLevel = 0;
 
     // returns the framerate of the layer with the given sequence ID
     float getLayerFramerate(nsecs_t now, int32_t id) const {

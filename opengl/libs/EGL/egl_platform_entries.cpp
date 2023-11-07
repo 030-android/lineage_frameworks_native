@@ -932,6 +932,12 @@ EGLContext eglCreateContextImpl(EGLDisplay dpy, EGLConfig config, EGLContext sha
         if (context != EGL_NO_CONTEXT) {
             // figure out if it's a GLESv1 or GLESv2
             int version = egl_connection_t::GLESv1_INDEX;
+
+#ifdef NV_ANDROID_FRAMEWORK_ENHANCEMENTS
+            if (cnx->egl.eglQueryAPI() == EGL_OPENGL_API)
+                version = egl_connection_t::GLESv2_INDEX;
+#endif
+
             if (attrib_list) {
                 while (*attrib_list != EGL_NONE) {
                     GLint attr = *attrib_list++;
@@ -1160,6 +1166,10 @@ __eglMustCastToProperFunctionPointerType eglGetProcAddressImpl(const char* procn
     addr = findBuiltinWrapper(procname);
     if (addr) return addr;
 
+#ifdef NV_ANDROID_FRAMEWORK_ENHANCEMENTS
+    if (gEGLImpl.dso && gEGLImpl.egl.eglGetProcAddress)
+        addr = gEGLImpl.egl.eglGetProcAddress(procname);
+#else
     // this protects accesses to sGLExtensionMap, sGLExtensionSlot, and sGLExtensionSlotMap
     pthread_mutex_lock(&sExtensionMapMutex);
 
@@ -1244,6 +1254,7 @@ __eglMustCastToProperFunctionPointerType eglGetProcAddressImpl(const char* procn
     }
 
     pthread_mutex_unlock(&sExtensionMapMutex);
+#endif
     return addr;
 }
 

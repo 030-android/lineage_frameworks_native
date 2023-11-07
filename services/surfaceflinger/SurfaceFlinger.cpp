@@ -155,6 +155,14 @@
 #include "Utils/Dumper.h"
 #include "WindowInfosListenerInvoker.h"
 
+#ifdef QCOM_UM_FAMILY
+#if __has_include("QtiGralloc.h")
+#include "QtiGralloc.h"
+#else
+#include "gralloc_priv.h"
+#endif
+#endif
+
 #include <aidl/android/hardware/graphics/common/DisplayDecorationSupport.h>
 #include <aidl/android/hardware/graphics/composer3/DisplayCapability.h>
 #include <aidl/android/hardware/graphics/composer3/RenderIntent.h>
@@ -586,8 +594,10 @@ void SurfaceFlinger::enableHalVirtualDisplays(bool enable) {
 }
 
 VirtualDisplayId SurfaceFlinger::acquireVirtualDisplay(ui::Size resolution,
-                                                       ui::PixelFormat format) {
-    if (auto& generator = mVirtualDisplayIdGenerators.hal) {
+                                                       ui::PixelFormat format,
+                                                       bool canAllocateHwcForVDS) {
+    auto& generator = mVirtualDisplayIdGenerators.hal;
+    if (canAllocateHwcForVDS && generator) {
         if (const auto id = generator->generateId()) {
             if (getHwComposer().allocateVirtualDisplay(*id, resolution, &format)) {
                 return *id;
@@ -841,9 +851,9 @@ void SurfaceFlinger::init() FTL_FAKE_GUARD(kMainThreadContext) {
 
     enableLatchUnsignaledConfig = getLatchUnsignaledConfig();
 
-    if (base::GetBoolProperty("debug.sf.enable_hwc_vds"s, false)) {
-        enableHalVirtualDisplays(true);
-    }
+    mAllowHwcForWFD = base::GetBoolProperty("vendor.display.vds_allow_hwc"s, false);
+    mAllowHwcForVDS = mAllowHwcForWFD && base::GetBoolProperty("debug.sf.enable_hwc_vds"s, false);
+    mFirstApiLevel = android::base::GetIntProperty("ro.product.first_api_level", 0);
 
     // Process hotplug for displays connected at boot.
     LOG_ALWAYS_FATAL_IF(!configureLocked(),
@@ -2568,6 +2578,7 @@ void SurfaceFlinger::composite(TimePoint frameTime, VsyncId vsyncId)
     ATRACE_FORMAT("%s %" PRId64, __func__, vsyncId.value);
 
     compositionengine::CompositionRefreshArgs refreshArgs;
+    refreshArgs.powerCallback = this;
     const auto& displays = FTL_FAKE_GUARD(mStateLock, mDisplays);
     refreshArgs.outputs.reserve(displays.size());
     std::vector<DisplayId> displayIds;
@@ -3401,6 +3412,11 @@ sp<DisplayDevice> SurfaceFlinger::setupNewDisplayDeviceInternal(
 
 void SurfaceFlinger::processDisplayAdded(const wp<IBinder>& displayToken,
                                          const DisplayDeviceState& state) {
+#ifdef QCOM_UM_FAMILY
+    bool canAllocateHwcForVDS = false;
+#else
+    bool canAllocateHwcForVDS = true;
+#endif
     ui::Size resolution(0, 0);
     ui::PixelFormat pixelFormat = static_cast<ui::PixelFormat>(PIXEL_FORMAT_UNKNOWN);
     if (state.physical) {
@@ -3415,6 +3431,20 @@ void SurfaceFlinger::processDisplayAdded(const wp<IBinder>& displayToken,
         status = state.surface->query(NATIVE_WINDOW_FORMAT, &format);
         ALOGE_IF(status != NO_ERROR, "Unable to query format (%d)", status);
         pixelFormat = static_cast<ui::PixelFormat>(format);
+#ifdef QCOM_UM_FAMILY
+        // Check if VDS is allowed to use HWC
+        size_t maxVirtualDisplaySize = getHwComposer().getMaxVirtualDisplayDimension();
+        if (maxVirtualDisplaySize == 0 || ((uint64_t)resolution.width <= maxVirtualDisplaySize &&
+            (uint64_t)resolution.height <= maxVirtualDisplaySize)) {
+            uint64_t usage = 0;
+            // Replace with native_window_get_consumer_usage ?
+            status = state .surface->getConsumerUsage(&usage);
+            ALOGW_IF(status != NO_ERROR, "Unable to query usage (%d)", status);
+            if ((status == NO_ERROR) && canAllocateHwcDisplayIdForVDS(usage)) {
+                canAllocateHwcForVDS = true;
+            }
+        }
+#endif
     } else {
         // Virtual displays without a surface are dormant:
         // they have external state (layer stack, projection,
@@ -3426,7 +3456,7 @@ void SurfaceFlinger::processDisplayAdded(const wp<IBinder>& displayToken,
     if (const auto& physical = state.physical) {
         builder.setId(physical->id);
     } else {
-        builder.setId(acquireVirtualDisplay(resolution, pixelFormat));
+        builder.setId(acquireVirtualDisplay(resolution, pixelFormat, canAllocateHwcForVDS));
     }
 
     builder.setPixels(resolution);
@@ -3446,7 +3476,8 @@ void SurfaceFlinger::processDisplayAdded(const wp<IBinder>& displayToken,
         const auto displayId = VirtualDisplayId::tryCast(compositionDisplay->getId());
         LOG_FATAL_IF(!displayId);
         auto surface = sp<VirtualDisplaySurface>::make(getHwComposer(), *displayId, state.surface,
-                                                       bqProducer, bqConsumer, state.displayName);
+                                                       bqProducer, bqConsumer, state.displayName,
+                                                       state.isSecure);
         displaySurface = surface;
         producer = std::move(surface);
     } else {
@@ -3924,6 +3955,10 @@ void SurfaceFlinger::triggerOnFrameRateOverridesChanged() {
     }();
 
     mScheduler->onFrameRateOverridesChanged(mAppConnectionHandle, displayId);
+}
+
+void SurfaceFlinger::notifyCpuLoadUp() {
+    mPowerAdvisor->notifyCpuLoadUp();
 }
 
 void SurfaceFlinger::initScheduler(const sp<const DisplayDevice>& display) {
@@ -7418,7 +7453,10 @@ ftl::SharedFuture<FenceResult> SurfaceFlinger::renderScreenImpl(
                                       renderArea->getHintForSeamlessTransition());
             sdrWhitePointNits = state.sdrWhitePointNits;
             displayBrightnessNits = state.displayBrightnessNits;
-            if (sdrWhitePointNits > 1.0f) {
+            // Only clamp the display brightness if this is not a seamless transition. Otherwise
+            // for seamless transitions it's important to match the current display state as the
+            // buffer will be shown under these same conditions, and we want to avoid any flickers
+            if (sdrWhitePointNits > 1.0f && !renderArea->getHintForSeamlessTransition()) {
                 // Restrict the amount of HDR "headroom" in the screenshot to avoid over-dimming
                 // the SDR portion. 2.0 chosen by experimentation
                 constexpr float kMaxScreenshotHeadroom = 2.0f;
@@ -7479,7 +7517,8 @@ ftl::SharedFuture<FenceResult> SurfaceFlinger::renderScreenImpl(
                                         .sdrWhitePointNits = sdrWhitePointNits,
                                         .displayBrightnessNits = displayBrightnessNits,
                                         .targetBrightness = targetBrightness,
-                                        .regionSampling = regionSampling});
+                                        .regionSampling = regionSampling,
+                                        .treat170mAsSrgb = mTreat170mAsSrgb});
 
         const float colorSaturation = grayscale ? 0 : 1;
         compositionengine::CompositionRefreshArgs refreshArgs{
@@ -7696,6 +7735,35 @@ gui::DisplayModeSpecs::RefreshRateRanges translate(const FpsRanges& ranges) {
 }
 
 } // namespace
+
+#ifdef QCOM_UM_FAMILY
+bool SurfaceFlinger::canAllocateHwcDisplayIdForVDS(uint64_t usage) {
+    uint64_t flag_mask_pvt_wfd = ~0;
+    uint64_t flag_mask_hw_video = ~0;
+    // Reserve hardware acceleration for WFD use-case
+    // GRALLOC_USAGE_PRIVATE_WFD + GRALLOC_USAGE_HW_VIDEO_ENCODER = WFD using HW composer.
+    flag_mask_pvt_wfd = GRALLOC_USAGE_PRIVATE_WFD;
+    flag_mask_hw_video = GRALLOC_USAGE_HW_VIDEO_ENCODER;
+    bool isWfd = (usage & flag_mask_pvt_wfd) && (usage & flag_mask_hw_video);
+    // Enabling only the vendor property would allow WFD to use HWC
+    // Enabling both the aosp and vendor properties would allow all other VDS to use HWC
+    // Disabling both would set all virtual displays to fall back to GPU
+    // In vendor frozen targets, allow WFD to use HWC without any property settings.
+    bool canAllocate = mAllowHwcForVDS || (isWfd && mAllowHwcForWFD) || (isWfd &&
+                       mFirstApiLevel < __ANDROID_API_T__);
+
+    if (canAllocate) {
+        enableHalVirtualDisplays(true);
+    }
+
+    return canAllocate;
+
+}
+#else
+bool SurfaceFlinger::canAllocateHwcDisplayIdForVDS(uint64_t) {
+    return true;
+}
+#endif
 
 status_t SurfaceFlinger::setDesiredDisplayModeSpecs(const sp<IBinder>& displayToken,
                                                     const gui::DisplayModeSpecs& specs) {

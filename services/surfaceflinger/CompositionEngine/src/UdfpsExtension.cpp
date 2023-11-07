@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The Android Open Source Project
+ * Copyright 2020 The LineageOS Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
-#pragma once
+#ifndef TARGET_PROVIDES_UDFPS_LIB
+#include <compositionengine/UdfpsExtension.h>
 
-#include <scheduler/FrameRateMode.h>
+uint32_t getUdfpsZOrder(uint32_t z, __unused bool touched) {
+    return z;
+}
 
-// Use a C style macro to keep the line numbers printed in gtest
-#define EXPECT_FRAME_RATE_MODE(_modePtr, _fps, _mode)                                \
-    EXPECT_EQ((scheduler::FrameRateMode{(_fps), (_modePtr)}), (_mode))               \
-            << "Expected " << (_fps) << " (" << (_modePtr)->getFps() << ") but was " \
-            << (_mode).fps << " (" << (_mode).modePtr->getFps() << ")"
+uint64_t getUdfpsUsageBits(uint64_t usageBits, __unused bool touched) {
+    return usageBits;
+}
+#endif
